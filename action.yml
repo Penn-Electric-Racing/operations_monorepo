@@ -1,0 +1,73 @@
+name: "Notion Issue/PR Sync"
+description: "Mirror GitHub issues and pull requests into a Notion database."
+
+inputs:
+  notion-token:
+    description: "Notion internal integration secret."
+    required: true
+  notion-database-id:
+    description: "ID of the Notion database backing the project board."
+    required: true
+  notion-version:
+    description: "Notion API version header."
+    required: false
+    default: "2022-06-28"
+  user-map:
+    description: "Path to a GitHub-login -> Notion-user-id JSON map. Relative to this action."
+    required: false
+    default: "config/user-map.json"
+  label-map:
+    description: "Path to a GitHub-label -> Notion-tag JSON map. Relative to this action."
+    required: false
+    default: "config/label-map.json"
+  tags-only-mapped:
+    description: "Only write labels that appear in the label map into Tags."
+    required: false
+    default: "true"
+  respect-manual-status:
+    description: "Do not overwrite a Status someone set by hand on an open item."
+    required: false
+    default: "true"
+  title-prefix:
+    description: "Template for the Notion page title prefix. Supports {owner} {repo} {number}."
+    required: false
+    default: "{repo}#{number} "
+  property-overrides:
+    description: "JSON object of PROP_* overrides, e.g. {\"PROP_URL\":\"Link\"}."
+    required: false
+    default: "{}"
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@v4
+      with:
+        node-version: "20"
+
+    - name: Sync to Notion
+      shell: bash
+      working-directory: ${{ github.action_path }}
+      env:
+        NOTION_TOKEN: ${{ inputs.notion-token }}
+        NOTION_DATABASE_ID: ${{ inputs.notion-database-id }}
+        NOTION_VERSION: ${{ inputs.notion-version }}
+        USER_MAP_PATH: ${{ inputs.user-map }}
+        LABEL_MAP_PATH: ${{ inputs.label-map }}
+        TAGS_ONLY_MAPPED: ${{ inputs.tags-only-mapped }}
+        RESPECT_MANUAL_STATUS: ${{ inputs.respect-manual-status }}
+        TITLE_PREFIX: ${{ inputs.title-prefix }}
+        PROPERTY_OVERRIDES: ${{ inputs.property-overrides }}
+      run: |
+        # Fold property-name overrides into the environment.
+        overrides="$(node -e '
+          const o = JSON.parse(process.env.PROPERTY_OVERRIDES || "{}");
+          for (const [k, v] of Object.entries(o)) {
+            if (!/^(PROP|STATUS)_[A-Z_]+$/.test(k)) throw new Error(`Bad override key: ${k}`);
+            console.log(`${k}\t${String(v).replace(/[\t\n]/g, " ")}`);
+          }
+        ')"
+        while IFS=$'\t' read -r key value; do
+          [ -n "$key" ] || continue
+          export "$key=$value"
+        done <<< "$overrides"
+        node scripts/sync.mjs

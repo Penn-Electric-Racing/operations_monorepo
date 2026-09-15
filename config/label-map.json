@@ -1,0 +1,9 @@
+{
+  "_comment": "GitHub label -> Notion Tags value(s). Value may be a string or an array. Labels matching P0-P4 route to Priority instead and never land here.",
+  "enhancement": "Feature",
+  "feature": "Feature",
+  "refactor": "Restructuring",
+  "cleanup": "Restructuring",
+  "tech-debt": "Restructuring",
+  "bug": "Bug"
+}

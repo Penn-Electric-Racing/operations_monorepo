@@ -1,0 +1,51 @@
+name: Notion Sync (reusable)
+
+# Alternative to the composite action, for orgs that prefer `workflow_call`
+# plus `secrets: inherit`.
+
+on:
+  workflow_call:
+    inputs:
+      notion-database-id:
+        required: true
+        type: string
+      sync-repo:
+        description: "Repo holding this sync code."
+        required: false
+        default: "Penn-Electric-Racing/notion-github-sync"
+        type: string
+      sync-ref:
+        required: false
+        default: "main"
+        type: string
+      title-prefix:
+        required: false
+        default: "{repo}#{number} "
+        type: string
+    secrets:
+      NOTION_TOKEN:
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      # NOTE: inside a reusable workflow, checkout defaults to the *caller's*
+      # repo, so the sync repo must be named explicitly.
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.sync-repo }}
+          ref: ${{ inputs.sync-ref }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - run: node scripts/sync.mjs
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          NOTION_DATABASE_ID: ${{ inputs.notion-database-id }}
+          TITLE_PREFIX: ${{ inputs.title-prefix }}
