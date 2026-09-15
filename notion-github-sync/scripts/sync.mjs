@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 import fs from "node:fs";
-import { createClient, findTitleProp, findPageByUrl } from "./lib/notion.mjs";
+import { createClient, findTitleProp, findPageByUrl, pageStatusName } from "./lib/notion.mjs";
 import { loadConfig, normalize, buildProperties } from "./lib/mapping.mjs";
 
 async function main() {
   const cfg = loadConfig();
-  if (!cfg.databaseId) throw new Error("NOTION_DATABASE_ID is not set.");
+  if (!cfg.databaseId) throw new Error("NOTION_SOFTWARE_PROJECT_BOARD_DATABASE_ID is not set.");
 
   const eventPath = process.env.GITHUB_EVENT_PATH;
   if (!eventPath || !fs.existsSync(eventPath)) throw new Error("No GITHUB_EVENT_PATH available.");
@@ -37,7 +37,6 @@ async function main() {
 
   const existing = await findPageByUrl(client, cfg.databaseId, schema, cfg.props.url, item.url);
 
-  // Deleted / transferred issues: archive rather than edit.
   if (payload.action === "deleted") {
     if (existing) {
       await client.updatePage(existing.id, { archived: true });
@@ -52,6 +51,7 @@ async function main() {
     titleProp,
     cfg,
     isNew: !existing,
+    currentStatus: pageStatusName(existing, cfg.props.status),
   });
 
   if (skipped.length) console.warn(`Skipped properties: ${skipped.join(", ")}`);

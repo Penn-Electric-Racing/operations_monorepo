@@ -1,18 +1,10 @@
 #!/usr/bin/env node
-/**
- * One-time import of existing issues and PRs into the Notion board.
- *
- *   REPOS="org/repo-a,org/repo-b" GITHUB_TOKEN=... NOTION_TOKEN=... \
- *   NOTION_DATABASE_ID=... node scripts/backfill.mjs
- *
- * Add DRY_RUN=true to print what would happen without writing to Notion.
- */
-import { createClient, findTitleProp, findPageByUrl } from "./lib/notion.mjs";
+import { createClient, findTitleProp, findPageByUrl, pageStatusName } from "./lib/notion.mjs";
 import { loadConfig, normalize, buildProperties } from "./lib/mapping.mjs";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const DRY_RUN = process.env.DRY_RUN === "true";
-const STATE = process.env.BACKFILL_STATE || "all"; // all | open | closed
+const STATE = process.env.BACKFILL_STATE || "all";
 
 async function listIssues(repo, token) {
   const out = [];
@@ -51,6 +43,7 @@ async function main() {
 
   let created = 0;
   let updated = 0;
+  const warned = new Set();
 
   for (const repo of repos) {
     const nodes = await listIssues(repo, ghToken);
@@ -60,10 +53,24 @@ async function main() {
       const kind = node.pull_request ? "pr" : "issue";
       const item = normalize({ node, repoFullName: repo, kind });
       const existing = await findPageByUrl(client, cfg.databaseId, schema, cfg.props.url, item.url);
-      const { props } = buildProperties({ item, schema, titleProp, cfg, isNew: !existing });
+      const { props, skipped } = buildProperties({
+        item, schema, titleProp, cfg,
+        isNew: !existing,
+        currentStatus: pageStatusName(existing, cfg.props.status),
+      });
+
+      for (const msg of skipped) {
+        if (warned.has(msg)) continue;
+        warned.add(msg);
+        console.warn(`Skipped property: ${msg}`);
+      }
 
       if (DRY_RUN) {
-        console.log(`${existing ? "would update" : "would create"} ${item.url}`);
+        const status = props[cfg.props.status]?.status?.name || props[cfg.props.status]?.select?.name || "(unset)";
+        const tags = (props[cfg.props.tags]?.multi_select || []).map((t) => t.name).join(", ") || "(none)";
+        console.log(
+          `${existing ? "would update" : "would create"} ${item.url} [status=${status}] [tags=${tags}]`
+        );
       } else if (existing) {
         await client.updatePage(existing.id, { properties: props });
         updated++;
@@ -71,7 +78,7 @@ async function main() {
         await client.createPage({ parent: { database_id: cfg.databaseId }, properties: props });
         created++;
       }
-      await sleep(350); // Notion allows ~3 req/s
+      await sleep(350);
     }
   }
 

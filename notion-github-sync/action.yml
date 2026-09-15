@@ -5,9 +5,10 @@ inputs:
   notion-token:
     description: "Notion internal integration secret."
     required: true
-  notion-database-id:
+  notion-software-project-board-database-id:
     description: "ID of the Notion database backing the project board."
-    required: true
+    required: false
+    default: "3d6560bc-c039-80d5-8e83-f26110371ac0"
   notion-version:
     description: "Notion API version header."
     required: false
@@ -33,7 +34,7 @@ inputs:
     required: false
     default: "{repo}#{number} "
   property-overrides:
-    description: "JSON object of PROP_* overrides, e.g. {\"PROP_URL\":\"Link\"}."
+    description: "JSON object of PROP_*, STATUS_* or TAG_* overrides, e.g. {\"PROP_URL\":\"Link\"}."
     required: false
     default: "{}"
 
@@ -49,7 +50,7 @@ runs:
       working-directory: ${{ github.action_path }}
       env:
         NOTION_TOKEN: ${{ inputs.notion-token }}
-        NOTION_DATABASE_ID: ${{ inputs.notion-database-id }}
+        NOTION_SOFTWARE_PROJECT_BOARD_DATABASE_ID: ${{ inputs.notion-software-project-board-database-id }}
         NOTION_VERSION: ${{ inputs.notion-version }}
         USER_MAP_PATH: ${{ inputs.user-map }}
         LABEL_MAP_PATH: ${{ inputs.label-map }}
@@ -62,7 +63,7 @@ runs:
         overrides="$(node -e '
           const o = JSON.parse(process.env.PROPERTY_OVERRIDES || "{}");
           for (const [k, v] of Object.entries(o)) {
-            if (!/^(PROP|STATUS)_[A-Z_]+$/.test(k)) throw new Error(`Bad override key: ${k}`);
+            if (!/^(PROP|STATUS|TAG)_[A-Z_]+$/.test(k)) throw new Error(`Bad override key: ${k}`);
             console.log(`${k}\t${String(v).replace(/[\t\n]/g, " ")}`);
           }
         ')"

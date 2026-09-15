@@ -44,14 +44,18 @@ export function createClient({ token, version = "2022-06-28", maxRetries = 4 }) 
   };
 }
 
-/** The database's title property is not always called "Name". */
 export function findTitleProp(schema) {
   const entry = Object.entries(schema.properties).find(([, v]) => v.type === "title");
   if (!entry) throw new Error("Database has no title property.");
   return entry[0];
 }
 
-/** Find a page by GitHub URL; the property may be `url` or `rich_text`. */
+export function pageStatusName(page, propName) {
+  if (!page || !propName) return null;
+  const prop = page.properties?.[propName];
+  return prop?.status?.name ?? prop?.select?.name ?? null;
+}
+
 export async function findPageByUrl(client, databaseId, schema, urlProp, url) {
   const type = schema.properties[urlProp]?.type;
   if (!type) return null;

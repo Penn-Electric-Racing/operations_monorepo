@@ -28,15 +28,14 @@ jobs:
       github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     steps:
-      - uses: Penn-Electric-Racing/notion-github-sync@main
+      - uses: Penn-Electric-Racing/operations_monorepo/notion-github-sync@main
         with:
           notion-token: ${{ secrets.NOTION_TOKEN }}
-          notion-database-id: ${{ vars.NOTION_DATABASE_ID }}
+          # The board id is the action's default. Pass
+          # notion-software-project-board-database-id here to target another board.
 
 # --- Reusable-workflow variant -------------------------------------------
 # jobs:
 #   notion:
-#     uses: Penn-Electric-Racing/notion-github-sync/.github/workflows/notion-sync.yml@main
-#     with:
-#       notion-database-id: ${{ vars.NOTION_DATABASE_ID }}
+#     uses: Penn-Electric-Racing/operations_monorepo/.github/workflows/notion-sync.yml@main
 #     secrets: inherit

@@ -1,0 +1,18 @@
+{
+  "_comment": "GitHub label -> Notion Tags value(s). Value may be a string or an array. Issue/PR come from the item kind.",
+  "enhancement": "Feature",
+  "feature": "Feature",
+  "feat": "Feature",
+  "bug": "Bug",
+  "defect": "Bug",
+  "refactor": "Restructuring",
+  "refactoring": "Restructuring",
+  "cleanup": "Restructuring",
+  "tech-debt": "Restructuring",
+  "documentation": "Documentation",
+  "docs": "Documentation",
+  "rookie-project": "Rookie Project",
+  "rookie": "Rookie Project",
+  "good first issue": "Rookie Project",
+  "onboarding": "Rookie Project"
+}

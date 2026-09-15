@@ -17,12 +17,11 @@ const readJson = (p, fallback) => {
 
 export function loadConfig() {
   return {
-    databaseId: (env("NOTION_DATABASE_ID") || "").replace(/-/g, ""),
+    databaseId: (env("NOTION_SOFTWARE_PROJECT_BOARD_DATABASE_ID") || "").replace(/-/g, ""),
     props: {
       url: env("PROP_URL", "GitHub URL"),
-      number: env("PROP_NUMBER", "Issue Number"),
+      number: env("PROP_NUMBER", ""),
       status: env("PROP_STATUS", "Status"),
-      priority: env("PROP_PRIORITY", "Priority"),
       tags: env("PROP_TAGS", "Tags"),
       owner: env("PROP_OWNER", "Owner"),
       contributors: env("PROP_CONTRIBUTORS", "Contributors"),
@@ -31,11 +30,16 @@ export function loadConfig() {
     },
     status: {
       notStarted: env("STATUS_NOT_STARTED", "Not started"),
-      inProgress: env("STATUS_IN_PROGRESS", "In progress"),
+      inProgress: env("STATUS_IN_PROGRESS", "Active Unclaimed"),
+      claimed: env("STATUS_CLAIMED", "Active Claimed"),
+      hold: env("STATUS_HOLD", "Hold"),
       done: env("STATUS_DONE", "Done"),
-      prClosedUnmerged: env("STATUS_PR_CLOSED_UNMERGED", env("STATUS_NOT_STARTED", "Not started")),
+      prClosedUnmerged: env("STATUS_PR_CLOSED_UNMERGED", "Abandoned"),
     },
     tagsOnlyMapped: env("TAGS_ONLY_MAPPED", "true") === "true",
+    kindTags: env("KIND_TAGS", "true") === "true",
+    tagIssue: env("TAG_ISSUE", "Issue"),
+    tagPr: env("TAG_PR", "PR"),
     respectManualStatus: env("RESPECT_MANUAL_STATUS", "true") === "true",
     titlePrefix: env("TITLE_PREFIX", "{repo}#{number} "),
     userMap: readJson(env("USER_MAP_PATH", "config/user-map.json"), {}),
@@ -43,9 +47,6 @@ export function loadConfig() {
   };
 }
 
-const PRIORITY_RE = /^P[0-4]$/i;
-
-/** Flatten a webhook `issue` / `pull_request` object. */
 export function normalize({ node, repoFullName, kind }) {
   const isPr = kind === "pr";
   return {
@@ -54,7 +55,7 @@ export function normalize({ node, repoFullName, kind }) {
     url: node.html_url,
     number: node.number,
     repo: repoFullName,
-    state: node.state, // "open" | "closed"
+    state: node.state,
     merged: isPr ? Boolean(node.merged || node.merged_at || node.pull_request?.merged_at) : false,
     draft: Boolean(node.draft),
     labels: (node.labels || []).map((l) => (typeof l === "string" ? l : l.name)),
@@ -65,15 +66,29 @@ export function normalize({ node, repoFullName, kind }) {
   };
 }
 
-export function decideStatus(item, isNew, cfg) {
+// Anything outside this set was put on an open page by a person. Hold is ours on a
+// PR only, where it means "draft"; on an issue it is a deliberate park.
+function syncOwnedOpenStatuses(item, cfg) {
+  const owned = [cfg.status.notStarted, cfg.status.inProgress];
+  if (item.kind === "pr") owned.push(cfg.status.hold);
+  return owned.filter(Boolean).map((n) => n.toLowerCase());
+}
+
+export function decideStatus(item, ctx, cfg) {
+  const { isNew = false, currentStatus = null } =
+    typeof ctx === "boolean" ? { isNew: ctx } : ctx || {};
+
   if (item.state === "closed") {
     if (item.kind === "pr" && !item.merged) return cfg.status.prClosedUnmerged;
     return cfg.status.done;
   }
-  if (item.kind === "pr") return item.draft ? cfg.status.notStarted : cfg.status.inProgress;
-  // Open issue: seed on creation, then leave it to humans.
-  if (isNew || !cfg.respectManualStatus) return cfg.status.notStarted;
-  return null; // null => leave the property alone
+
+  const wanted = item.kind === "pr" && item.draft ? cfg.status.hold : cfg.status.inProgress;
+
+  if (isNew || !cfg.respectManualStatus) return wanted;
+  if (!currentStatus) return wanted;
+  if (syncOwnedOpenStatuses(item, cfg).includes(currentStatus.toLowerCase())) return wanted;
+  return null;
 }
 
 function peopleValue(logins, userMap) {
@@ -81,10 +96,10 @@ function peopleValue(logins, userMap) {
   return ids.map((id) => ({ object: "user", id }));
 }
 
-function tagValues(labels, cfg) {
+function tagValues(item, cfg) {
   const out = [];
-  for (const label of labels) {
-    if (PRIORITY_RE.test(label)) continue;
+  if (cfg.kindTags) out.push(item.kind === "pr" ? cfg.tagPr : cfg.tagIssue);
+  for (const label of item.labels) {
     const mapped = cfg.labelMap[label];
     if (mapped) out.push(...[].concat(mapped));
     else if (!cfg.tagsOnlyMapped) out.push(label);
@@ -92,8 +107,29 @@ function tagValues(labels, cfg) {
   return [...new Set(out)];
 }
 
-/** Build a Notion `properties` payload, skipping unknown properties and types. */
-export function buildProperties({ item, schema, titleProp, cfg, isNew }) {
+// The API cannot create status options, so an unknown name is a hard 400. Match the
+// live schema by name, then case-insensitively, then by group.
+function resolveStatusName(def, wanted) {
+  const options = def?.status?.options || [];
+  const groups = def?.status?.groups || [];
+
+  const exact = options.find((o) => o.name === wanted);
+  if (exact) return exact.name;
+
+  const lower = String(wanted).toLowerCase();
+  const insensitive = options.find((o) => o.name.toLowerCase() === lower);
+  if (insensitive) return insensitive.name;
+
+  const group = groups.find((g) => g.name.toLowerCase() === lower);
+  if (group) {
+    const first = (group.option_ids || []).map((id) => options.find((o) => o.id === id)).find(Boolean);
+    if (first) return first.name;
+  }
+
+  return null;
+}
+
+export function buildProperties({ item, schema, titleProp, cfg, isNew, currentStatus = null }) {
   const props = {};
   const skipped = [];
 
@@ -109,7 +145,7 @@ export function buildProperties({ item, schema, titleProp, cfg, isNew }) {
       skipped.push(`${name} (unsupported type "${def.type}")`);
       return;
     }
-    if (value === null) return; // intentional no-op
+    if (value === null) return;
     props[name] = value;
   };
 
@@ -137,21 +173,19 @@ export function buildProperties({ item, schema, titleProp, cfg, isNew }) {
     rich_text: { rich_text: [{ text: { content: item.repo } }] },
   });
 
-  const statusName = decideStatus(item, isNew, cfg);
+  const wantedStatus = decideStatus(item, { isNew, currentStatus }, cfg);
+  const statusDef = cfg.props.status ? schema.properties[cfg.props.status] : undefined;
+  let statusName = wantedStatus;
+  if (wantedStatus && statusDef?.type === "status") {
+    statusName = resolveStatusName(statusDef, wantedStatus);
+    if (!statusName) skipped.push(`${cfg.props.status} (option "${wantedStatus}" not on database)`);
+  }
   set(cfg.props.status, {
     status: statusName ? { status: { name: statusName } } : null,
     select: statusName ? { select: { name: statusName } } : null,
   });
 
-  // Labels and milestones are mirrored, so removing one clears the property.
-  const priority = item.labels.find((l) => PRIORITY_RE.test(l))?.toUpperCase();
-  set(cfg.props.priority, {
-    select: { select: priority ? { name: priority } : null },
-    multi_select: { multi_select: priority ? [{ name: priority }] : [] },
-    status: priority ? { status: { name: priority } } : null, // status options can't be cleared safely
-  });
-
-  const tags = tagValues(item.labels, cfg);
+  const tags = tagValues(item, cfg);
   set(cfg.props.tags, {
     multi_select: { multi_select: tags.map((name) => ({ name })) },
     select: { select: tags.length ? { name: tags[0] } : null },
