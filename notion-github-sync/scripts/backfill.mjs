@@ -5,6 +5,7 @@ import { loadConfig, normalize, buildProperties } from "./lib/mapping.mjs";
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const DRY_RUN = process.env.DRY_RUN === "true";
 const STATE = process.env.BACKFILL_STATE || "all";
+const IMPORT_CLOSED = process.env.IMPORT_CLOSED === "true";
 
 const SINCE_MINUTES = Number(process.env.SINCE_MINUTES) || 0;
 const SINCE = SINCE_MINUTES
@@ -63,6 +64,7 @@ async function main() {
 
   let created = 0;
   let updated = 0;
+  let skippedClosed = 0;
   const warned = new Set();
 
   for (const repo of repos) {
@@ -73,6 +75,12 @@ async function main() {
       const kind = node.pull_request ? "pr" : "issue";
       const item = normalize({ node, repoFullName: repo, kind });
       const existing = await findPageByUrl(client, cfg.databaseId, schema, cfg.props.url, item.url);
+
+      if (!existing && item.state === "closed" && !IMPORT_CLOSED) {
+        skippedClosed++;
+        continue;
+      }
+
       const { props, skipped } = buildProperties({
         item, schema, titleProp, cfg,
         isNew: !existing,
@@ -102,7 +110,9 @@ async function main() {
     }
   }
 
-  console.log(`Done. created=${created} updated=${updated}${DRY_RUN ? " (dry run)" : ""}`);
+  console.log(
+    `Done. created=${created} updated=${updated} skipped_closed=${skippedClosed}${DRY_RUN ? " (dry run)" : ""}`
+  );
 }
 
 main().catch((err) => {

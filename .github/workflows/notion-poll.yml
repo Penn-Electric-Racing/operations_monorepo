@@ -3,6 +3,7 @@ name: Poll to Notion
 on:
   schedule:
     - cron: "*/15 * * * *"
+    - cron: "40 4 * * *"
   workflow_dispatch:
 
 permissions:
@@ -25,7 +26,8 @@ jobs:
       - name: Sync recently updated issues and PRs
         working-directory: notion-github-sync
         env:
-          SINCE_MINUTES: "60"
+          SINCE_MINUTES: ${{ github.event.schedule == '40 4 * * *' && '0' || '1440' }}
+          BACKFILL_STATE: ${{ github.event.schedule == '40 4 * * *' && 'open' || 'all' }}
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.GH_READ_TOKEN }}
         run: node scripts/backfill.mjs

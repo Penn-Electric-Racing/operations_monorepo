@@ -2,8 +2,8 @@
 
 Mirrors GitHub issues and pull requests from every Penn Electric Racing repo
 into the single Notion database behind our project board. One scheduled workflow
-in `operations_monorepo` polls every listed repo every 15 minutes — **mirrored
-repos carry no workflow file and no secrets of their own.**
+in `operations_monorepo` polls every listed repo — **mirrored repos carry no
+workflow file and no secrets of their own.**
 
 All commands below are run from this directory.
 
@@ -195,9 +195,18 @@ unset REPOS SINCE_MINUTES   # in case either is left over in your shell
 export NOTION_TOKEN=ntn_...
 export GITHUB_TOKEN="$(gh auth token)"
 
-DRY_RUN=true node scripts/backfill.mjs   # preview
-node scripts/backfill.mjs                # for real
+BACKFILL_STATE=open DRY_RUN=true node scripts/backfill.mjs   # preview
+BACKFILL_STATE=open node scripts/backfill.mjs                # for real
 ```
+
+**Use `BACKFILL_STATE=open`.** The default `all` walks every issue and PR ever
+opened — ~939 across these four repos — which takes 15-20 minutes at Notion's
+rate limit, only to skip nearly all of them (see below).
+
+**Closed items never create a card.** A closed issue or PR only *updates* a card
+that already exists, moving it to `Done` or `Abandoned`. One with no card was
+never on the board and is skipped, counted as `skipped_closed` in the run
+finished work.
 
 | Variable | Default | Effect |
 |---|---|---|
@@ -206,6 +215,7 @@ node scripts/backfill.mjs                # for real
 | `REPOS` | `DEFAULT_REPOS` in the script | Comma-separated `owner/repo`, to run against a subset. |
 | `SINCE_MINUTES` | *unset* | Unset walks everything; set, only items updated in that window. |
 | `BACKFILL_STATE` | `all` | `all`, `open` or `closed`. |
+| `IMPORT_CLOSED` | `false` | `true` also creates cards for closed items that have none. |
 | `DRY_RUN` | `false` | `true` prints every create/update without writing to Notion. |
 | `NOTION_SOFTWARE_PROJECT_BOARD_DATABASE_ID` | the board ID in `mapping.mjs` | Target a different database. |
 
@@ -218,18 +228,46 @@ rather than duplicating. The poll picks up from there.
 
 ## 7. How the poll works
 
-`.github/workflows/notion-poll.yml` runs `scripts/backfill.mjs` every 15
-minutes. `workflow_dispatch` runs it on demand.
+`.github/workflows/notion-poll.yml` runs `scripts/backfill.mjs` on two schedules.
+`workflow_dispatch` runs it on demand.
 
-`SINCE_MINUTES: 60` makes it fetch only items whose `updated_at` falls in the
-last hour, instead of every issue ever. The window is deliberately much wider
-than the 15-minute interval: GitHub delays scheduled runs under load and **may drop
-them entirely**, so a tight window would lose items silently, while re-syncing
-an unchanged item is a harmless in-place update.
+| | cron | window | state | items |
+|---|---|---|---|---|
+| Fast path | `*/15 * * * *` | 24h | all | ~17 |
+| Safety net | `40 4 * * *` | none | open | ~22 |
 
-Expect up to 15 minutes of latency, plus whatever GitHub adds.
+The step picks its mode from `github.event.schedule`. Manual runs take the fast
+path.
 
-A `concurrency` group prevents a slow run from overlapping the next one.
+**Why two.** GitHub does not honour `*/15` for free scheduled runs — observed
+gaps between consecutive runs have exceeded five hours, and unserved slots are
+*discarded, not queued*. The fast path's 24h window is sized to cover that gap:
+an item updated inside a skipped gap and older than the window is missed
+**permanently**, because `since` filters on `updated_at` and a missed item never
+reappears. The window is a bet on how bad the gaps get.
+
+The nightly removes the bet. With no window it reconciles every currently-open
+issue and PR regardless of when it last changed, so a gap of *any* length is
+recoverable. Scoping it to `open` is what keeps it cheap — a full `state=all`
+walk is ~939 items and 15+ minutes, versus ~22 items and seconds.
+
+Re-syncing an unchanged item is an idempotent no-op write and the `GitHub URL`
+is the dedupe key, so the overlap between the two costs almost nothing.
+
+Latency is whatever GitHub gives you — often 15 minutes, sometimes hours.
+`gh workflow run notion-poll.yml` forces a run.
+
+To see how badly the schedule is actually served:
+
+```bash
+gh run list --repo Penn-Electric-Racing/operations_monorepo \
+  --workflow notion-poll.yml -L 100 \
+  --json event,createdAt --jq '.[] | select(.event=="schedule") | .createdAt' | sort
+```
+
+Never set `SINCE_MINUTES` below the largest gap you see there.
+
+A `concurrency` group prevents a slow run from overlapping the next.
 
 ---
 
@@ -362,7 +400,18 @@ skipped with a warning rather than failing the run.
   is public on purpose: public repos get unlimited free Actions minutes, while
   private ones draw on the org's 2,000/month pool shared with all other CI. An
   15-minute poll would take ~2,880 of those, since each run bills as a full
-  minute however little it does. Any commit resets the 60-day clock; a re-enable is
+  minute however little it does.
+- **The schedule is best-effort, and cannot be made otherwise.** GitHub
+  deprioritizes free scheduled runs and discards unserved slots; gaps of several
+  hours between `*/15` runs are normal. There is no SLA and no retry. The only
+  reliable trigger is an external scheduler calling the `workflow_dispatch` API,
+  which costs a second system and a token with `actions: write` living outside
+  GitHub — not worth it while drops cost latency rather than data.
+- **A card can miss its move to `Done`.** If an item's close falls entirely inside
+  a gap longer than the 24h window, its existing card is left showing open work:
+  the nightly only reads open items, and the window has passed the close. Rare,
+  and fixed by a one-off `BACKFILL_STATE=closed node scripts/backfill.mjs`, which
+  only updates cards that already exist. Any commit resets the 60-day clock; a re-enable is
   manual, and it fails quietly.
 - **PAT expiry.** `GH_READ_TOKEN` is the single point of failure for every repo
   at once, and it fails silently on expiry.
