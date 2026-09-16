@@ -11,14 +11,15 @@ The GitHub URL is the primary key, so re-running is always safe — an item that
 already exists is updated in place rather than duplicated.
 
 No dependencies, plain Node 20 `fetch`. The Notion database and its properties
-already exist; all you supply is the token and the database ID.
+already exist, and the database ID is baked into `action.yml`; all you supply
+per repo is the token.
 
 ---
 
 ## Contents
 
 1. [Get the token and database ID](#1-get-the-token-and-database-id)
-2. [Add the org credentials](#2-add-the-org-credentials)
+2. [Add the token](#2-add-the-token)
 3. [Install into each repository](#3-install-into-each-repository)
 4. [Verify an install](#4-verify-an-install)
 5. [Backfill existing issues and PRs](#5-backfill-existing-issues-and-prs)
@@ -45,72 +46,54 @@ https://www.notion.so/Penn-Electric-Racing/1f2e3d4c5b6a7890abcdef1234567890?v=..
                                            ^------------ this ------------^
 ```
 
-Dashes are fine; the script strips them.
+Dashes are fine; the script strips them. You only need this value to change
+`action.yml`'s default or to run the backfill (section 5) — the workflows don't
+take it.
 
 ---
 
-## 2. Add the org credentials
+## 2. Add the token
 
 The **database ID is baked into the action** as the default for
 `notion-software-project-board-database-id` (`action.yml`). It is an identifier,
-not a credential — it grants nothing without the token — so it needs no secret,
-no variable, and nothing to configure per repo. Point a repo at another board by
-passing that input explicitly (section "Property names").
+not a credential — it grants nothing without the token — so there is nothing to
+configure per repo. Point a repo at another board by passing that input
+explicitly (section "Property names").
 
-That leaves one credential, the token:
-
-```bash
-gh secret set NOTION_TOKEN --org Penn-Electric-Racing --visibility all
-```
-
-With no `--body` it prompts for the value on stdin, which keeps the token out of
-your shell history. `--visibility all` means every repo — current and future —
-can read it, so onboarding a new repo is just dropping in the workflow
-(section 3); there is nothing to re-run here.
-
-This needs **org owner** privileges — a plain member gets `403 You must be an org
-admin`, and `gh auth refresh -s admin:org` does not help (the scope widens what
-the token may do, not what the account may do). If you aren't an owner, ask one.
-
-Worth knowing about `--visibility all`: an org secret is readable by any workflow
-in any org repo, so anyone who can merge a workflow anywhere in the org can read
-the Notion token.
-
-### If the org is on GitHub Free
-
-Org secrets do not reach **private** repos while the org is on GitHub Free —
-there, `--visibility all` effectively means "all public repositories". A private
-repo sees `secrets.NOTION_TOKEN` as an empty string.
-
-The REST API is **not** a reliable check: `gh api
-repos/<org>/<repo>/actions/organization-secrets` still lists the secret, because
-that endpoint reports the configured visibility, not the plan gate applied at run
-time. The reliable signal is the run log — open the failing job's
-`Run .../notion-github-sync@main` group and read the `with:` block. GitHub omits
-inputs whose value is an empty string, so on a broken run `notion-token` is
-missing from the list while the defaults (`notion-version`, `user-map`, ...) are
-all present.
-
-Confirm the plan with `gh api orgs/Penn-Electric-Racing --jq .plan.name`. The fix
-is a repo-level secret, which has no visibility setting and no plan gate:
+That leaves one credential, and it goes on **each repo**, not the org:
 
 ```bash
-gh secret set NOTION_TOKEN --repo Penn-Electric-Racing/car-data-server
+read -rs NOTION_TOKEN && export NOTION_TOKEN   # silent prompt; paste, then Enter
+
+for r in car-data-server Penn-Electric-Racing PER-Data-Analyzer SuboptimumG; do
+  gh secret set NOTION_TOKEN --repo "Penn-Electric-Racing/$r" --body "$NOTION_TOKEN"
+done
 ```
 
-`rollout.sh` does this across `$REPOS` when you give it the value:
+`rollout.sh` does the same thing as part of onboarding — if `NOTION_TOKEN` is
+exported it seeds the secret on every repo in `$REPOS` before writing the
+workflow (section 3). Leave it unset and the script only writes workflows.
 
-```bash
-export ORG=Penn-Electric-Racing
-export REPOS="car-data-server telemetry ..."
-read -rs NOTION_TOKEN && export NOTION_TOKEN   # keeps it out of shell history
+Needs **admin** on each repo. Never pass the token as a literal `--body` value:
+that writes it to `~/.bash_history`. The `read -rs` form above avoids it.
 
-./scripts/rollout.sh
-```
+### Why not an org secret
 
-`NOTION_TOKEN` is optional: leave it unset and `rollout.sh` only writes the
-workflow, as before. Unlike the org-wide command this needs re-running for each
-new repo.
+`gh secret set --org ... --visibility all` looks like the obvious answer and
+does not work here: **org secrets do not reach private repos on the GitHub Free
+plan**, whatever visibility you set. A private repo just sees
+`secrets.NOTION_TOKEN` as an empty string and the run fails with
+`NOTION_TOKEN is not set`.
+
+The REST API won't tell you — `.../actions/organization-secrets` still lists the
+secret, because it reports configured visibility, not the plan gate applied at
+run time. The reliable signal is the run log: GitHub omits inputs whose value is
+empty, so on a broken run `notion-token` is simply missing from the step's
+`with:` block while the defaults are all present.
+
+Repo-level secrets have no visibility setting and no plan gate, so they work
+everywhere. The cost is that each new repo needs the command re-run, and a token
+rotation has to touch every repo rather than one org setting.
 
 ---
 
@@ -120,29 +103,31 @@ new repo.
 
 ```bash
 export ORG=Penn-Electric-Racing
-export REPOS="operations_monorepo car-data-server SuboptimumG"
+export REPOS="car-data-server Penn-Electric-Racing PER-Data-Analyzer SuboptimumG"
+export MODE=pr
 
 DRY_RUN=true ./scripts/rollout.sh   # preview
 ./scripts/rollout.sh                # for real
 ```
 
-Needs `gh` authenticated with `repo` and `workflow` scopes; the script checks
-the token up front and refuses to start without them.
+`MODE=pr` writes to a `chore/notion-sync` branch and opens a PR. Use it by
+default: it is required on repos with branch protection and harmless on those
+without. Merge each PR — issue syncing does nothing until the workflow is on the
+default branch (section 6).
 
-**Public repos are excluded on purpose.** `operations_monorepo` is private, and
-a workflow in a public repo cannot resolve an action from a private one — the
-run fails at *Set up job* with `Unable to resolve action ..., not found`, before
-any of your code executes. `rollout.sh` detects this and skips those repos with
-a message rather than opening a PR that is guaranteed to fail. That is why
-`PER-Data-Analyzer` is absent from the list above. To mirror it, either move
-`notion-github-sync/` into its own public repo or make `operations_monorepo`
-public, then add it back.
+Export `NOTION_TOKEN` too (section 2) and the same run also seeds the repo-level
+secret before writing the workflow, so onboarding is one command.
+
+Needs `gh` authenticated with `repo` and `workflow` scopes plus admin on each
+repo; the script checks the token scopes up front and refuses to start without
+them.
 
 | Variable | Default | Effect |
 |---|---|---|
 | `ORG` | *required* | Org that owns the target repos. |
 | `REPOS` | *required* | Space-separated repo **names**, not `owner/repo`. |
-| `MODE` | `direct` | `pr` writes to a `chore/notion-sync` branch and opens a PR — use this for repos with branch protection, and it is harmless on repos without it. |
+| `MODE` | `direct` | `pr` opens a PR instead of writing to the default branch. |
+| `NOTION_TOKEN` | *unset* | If set, also seeds it as a repo-level Actions secret on each repo. |
 | `SYNC_REPO` | `$ORG/operations_monorepo` | Owner/name of the repo holding this action. |
 | `REF` | `main` | Tag or branch of the action to pin callers to, e.g. `REF=v1`. |
 | `DRY_RUN` | `false` | `true` prints what would happen and changes nothing. |
@@ -166,12 +151,9 @@ needs editing.
 
 ### For new repos going forward
 
-- **Starter workflow** — put the file in `workflow-templates/` of the org's
-  `.github` repo with a small `.properties.json` beside it, and it shows up as a
-  suggested workflow in every new repo.
-- **Repository ruleset** (Enterprise Cloud) — Organization settings → Rulesets →
-  require the workflow. Enforces rather than suggests, and applies retroactively
-  to repos matching a name pattern.
+Put the file in `workflow-templates/` of the org's `.github` repo with a small
+`.properties.json` beside it and it shows up as a suggested workflow in every new
+repo. Remember the repo-level secret still has to be set (section 2).
 
 ---
 
@@ -362,10 +344,8 @@ what keeps the sync alive as the board schema drifts.
 | `Could not find database with ID` | You used a page ID, not the database ID. |
 | `Changes must be made through a pull request` (409) from `rollout.sh` | Branch protection on that repo. Re-run as `MODE=pr ./scripts/rollout.sh`. |
 | `gh: Not Found (HTTP 404)` from `rollout.sh` | Token lacks the `workflow` scope — writes under `.github/workflows/` 404 rather than 403. `gh auth refresh -h github.com -s workflow`. |
-| `Unable to resolve action ..., not found` at *Set up job* | The calling repo is public and the action repo is private. Public repos cannot use private actions; see section 3. |
-| `repository not found` on the `uses:` line | Private action repo without org-wide Actions access enabled. |
-| `NOTION_SOFTWARE_PROJECT_BOARD_DATABASE_ID is not set` | The caller workflow passes an empty `notion-software-project-board-database-id`. Drop that line and let the action's default apply (section 2). |
-| `NOTION_TOKEN is not set` | The org secret isn't reaching this repo — on the Free plan it never reaches private ones. Set it repo-level (section 2). |
+| `NOTION_SOFTWARE_PROJECT_BOARD_DATABASE_ID is not set` | The caller workflow passes that input as an empty value. Drop the line and let the action's default apply. |
+| `NOTION_TOKEN is not set` | No repo-level secret on this repo. Org secrets don't reach private repos on the Free plan (section 2). |
 | Workflow never runs on new issues | The file isn't on the default branch yet (section 6). |
 | Nothing runs on a fork's PR | By design — fork PRs get no secrets. |
 | Status never changes | The configured option doesn't exist on the board and didn't resolve to a group either; the API can't create status options, only `select` ones. Look for `Status (option "X" not on database)` in the log. |
