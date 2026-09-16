@@ -15,9 +15,11 @@ const readJson = (p, fallback) => {
   }
 };
 
+const DEFAULT_DATABASE_ID = "3d6560bc-c039-80d5-8e83-f26110371ac0";
+
 export function loadConfig() {
   return {
-    databaseId: (env("NOTION_SOFTWARE_PROJECT_BOARD_DATABASE_ID") || "").replace(/-/g, ""),
+    databaseId: env("NOTION_SOFTWARE_PROJECT_BOARD_DATABASE_ID", DEFAULT_DATABASE_ID).replace(/-/g, ""),
     props: {
       url: env("PROP_URL", "GitHub URL"),
       number: env("PROP_NUMBER", ""),
@@ -66,8 +68,6 @@ export function normalize({ node, repoFullName, kind }) {
   };
 }
 
-// Anything outside this set was put on an open page by a person. Hold is ours on a
-// PR only, where it means "draft"; on an issue it is a deliberate park.
 function syncOwnedOpenStatuses(item, cfg) {
   const owned = [cfg.status.notStarted, cfg.status.inProgress];
   if (item.kind === "pr") owned.push(cfg.status.hold);
@@ -91,8 +91,14 @@ export function decideStatus(item, ctx, cfg) {
   return null;
 }
 
+const userId = (id) => {
+  const hex = String(id ?? "").replace(/-/g, "").toLowerCase();
+  if (!/^[0-9a-f]{32}$/.test(hex) || /^0+$/.test(hex)) return null;
+  return hex;
+};
+
 function peopleValue(logins, userMap) {
-  const ids = [...new Set(logins.map((l) => userMap[l]).filter(Boolean))];
+  const ids = [...new Set(logins.map((l) => userId(userMap[l])).filter(Boolean))];
   return ids.map((id) => ({ object: "user", id }));
 }
 
@@ -107,8 +113,6 @@ function tagValues(item, cfg) {
   return [...new Set(out)];
 }
 
-// The API cannot create status options, so an unknown name is a hard 400. Match the
-// live schema by name, then case-insensitively, then by group.
 function resolveStatusName(def, wanted) {
   const options = def?.status?.options || [];
   const groups = def?.status?.groups || [];

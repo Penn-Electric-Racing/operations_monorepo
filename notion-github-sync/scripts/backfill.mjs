@@ -6,11 +6,24 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const DRY_RUN = process.env.DRY_RUN === "true";
 const STATE = process.env.BACKFILL_STATE || "all";
 
+const SINCE_MINUTES = Number(process.env.SINCE_MINUTES) || 0;
+const SINCE = SINCE_MINUTES
+  ? new Date(Date.now() - SINCE_MINUTES * 60000).toISOString()
+  : "";
+
+const DEFAULT_REPOS = [
+  "Penn-Electric-Racing/car-data-server",
+  "Penn-Electric-Racing/Penn-Electric-Racing",
+  "Penn-Electric-Racing/PER-Data-Analyzer",
+  "Penn-Electric-Racing/SuboptimumG",
+];
+
 async function listIssues(repo, token) {
   const out = [];
+  const since = SINCE ? `&since=${SINCE}` : "";
   for (let page = 1; ; page++) {
     const res = await fetch(
-      `https://api.github.com/repos/${repo}/issues?state=${STATE}&per_page=100&page=${page}`,
+      `https://api.github.com/repos/${repo}/issues?state=${STATE}&per_page=100&page=${page}${since}`,
       {
         headers: {
           Authorization: `Bearer ${token}`,
@@ -29,8 +42,15 @@ async function listIssues(repo, token) {
 
 async function main() {
   const cfg = loadConfig();
-  const repos = (process.env.REPOS || "").split(",").map((s) => s.trim()).filter(Boolean);
-  if (!repos.length) throw new Error("Set REPOS to a comma-separated list of owner/repo.");
+  const repos = (process.env.REPOS || DEFAULT_REPOS.join(",")).split(",").map((s) => s.trim()).filter(Boolean);
+  if (!repos.length) throw new Error("REPOS is set but empty.");
+  const bad = repos.filter((r) => !/^[\w.-]+\/[\w.-]+$/.test(r));
+  if (bad.length) {
+    throw new Error(
+      `REPOS must be comma-separated owner/repo. Bad entries: ${bad.join(", ")}\n` +
+        `If this is left over from another command, run: unset REPOS`
+    );
+  }
   const ghToken = process.env.GITHUB_TOKEN;
   if (!ghToken) throw new Error("GITHUB_TOKEN is not set.");
 
@@ -47,7 +67,7 @@ async function main() {
 
   for (const repo of repos) {
     const nodes = await listIssues(repo, ghToken);
-    console.log(`${repo}: ${nodes.length} issues/PRs`);
+    console.log(`${repo}: ${nodes.length} issues/PRs${SINCE ? ` updated since ${SINCE}` : ""}`);
 
     for (const node of nodes) {
       const kind = node.pull_request ? "pr" : "issue";

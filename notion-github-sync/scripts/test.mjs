@@ -4,7 +4,7 @@ import { loadConfig, normalize, decideStatus, buildProperties } from "./lib/mapp
 
 process.env.USER_MAP_PATH = "config/user-map.json";
 process.env.LABEL_MAP_PATH = "config/label-map.json";
-const cfg = { ...loadConfig(), userMap: { alice: "u-alice", bob: "u-bob" } };
+const cfg = { ...loadConfig(), userMap: { alice: "11111111-1111-4111-8111-111111111111", bob: "22222222-2222-4222-8222-222222222222" } };
 
 const statusDef = {
   type: "status",
@@ -165,7 +165,25 @@ assert.deepEqual(
 );
 assert.equal(props.Priority, undefined, "Priority is never written — it is manual in Notion");
 assert.deepEqual(props.Due, { date: { start: "2026-01-02" } });
-assert.deepEqual(props.Owner, { people: [{ object: "user", id: "u-alice" }] }, "author is the fallback owner");
+assert.deepEqual(props.Owner, { people: [{ object: "user", id: "11111111111141118111111111111111" }] }, "author is the fallback owner");
+
+// A UUID that isn't a real Notion user makes the API reject the whole page.
+const badIds = build({}, "issue", false, {
+  ...cfg,
+  userMap: { alice: "00000000-0000-0000-0000-000000000000" },
+});
+assert.equal(badIds.props.Owner, undefined, "placeholder user IDs are dropped, leaving Owner unwritten");
+
+// /v1/users returns IDs with or without dashes; both must work.
+const undashed = build({}, "issue", false, {
+  ...cfg,
+  userMap: { alice: "2b458698d1054366b74f598f6fd96357" },
+});
+assert.deepEqual(
+  undashed.props.Owner,
+  { people: [{ object: "user", id: "2b458698d1054366b74f598f6fd96357" }] },
+  "an undashed user ID is accepted"
+);
 assert.equal(props["Issue Number"], undefined, "Issue Number is off by default");
 assert.deepEqual(skipped, ["Contributors (not on database)"]);
 

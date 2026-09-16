@@ -1,9 +1,9 @@
 # notion-github-sync
 
 Mirrors GitHub issues and pull requests from every Penn Electric Racing repo
-into the single Notion database behind our project board. This directory of
-`operations_monorepo` holds the sync code; each mirrored repo adds one
-~20-line workflow that calls it.
+into the single Notion database behind our project board. One scheduled workflow
+in `operations_monorepo` polls every listed repo every 15 minutes — **mirrored
+repos carry no workflow file and no secrets of their own.**
 
 All commands below are run from this directory.
 
@@ -11,19 +11,19 @@ The GitHub URL is the primary key, so re-running is always safe — an item that
 already exists is updated in place rather than duplicated.
 
 No dependencies, plain Node 20 `fetch`. The Notion database and its properties
-already exist, and the database ID is baked into `action.yml`; all you supply
-per repo is the token.
+already exist.
 
 ---
 
 ## Contents
 
 1. [Get the token and database ID](#1-get-the-token-and-database-id)
-2. [Add the token](#2-add-the-token)
-3. [Install into each repository](#3-install-into-each-repository)
-4. [Verify an install](#4-verify-an-install)
-5. [Backfill existing issues and PRs](#5-backfill-existing-issues-and-prs)
-6. [What triggers from where](#6-what-triggers-from-where)
+2. [Add the two secrets](#2-add-the-two-secrets)
+3. [Map people to the Notion People columns](#3-map-people-to-the-notion-people-columns)
+4. [Add a repo to the sync](#4-add-a-repo-to-the-sync)
+5. [Verify](#5-verify)
+6. [Backfill existing issues and PRs](#6-backfill-existing-issues-and-prs)
+7. [How the poll works](#7-how-the-poll-works)
 7. [Field mapping](#field-mapping)
 8. [Troubleshooting](#troubleshooting)
 9. [Known limits](#known-limits)
@@ -46,175 +46,190 @@ https://www.notion.so/Penn-Electric-Racing/1f2e3d4c5b6a7890abcdef1234567890?v=..
                                            ^------------ this ------------^
 ```
 
-Dashes are fine; the script strips them. You only need this value to change
-`action.yml`'s default or to run the backfill (section 5) — the workflows don't
-take it.
+Dashes are fine; the script strips them. It is set once in the poll workflow's
+`env:` block and in the backfill command (section 5).
 
 ---
 
-## 2. Add the token
+## 2. Add the two secrets
 
-The **database ID is baked into the action** as the default for
-`notion-software-project-board-database-id` (`action.yml`). It is an identifier,
-not a credential — it grants nothing without the token — so there is nothing to
-configure per repo. Point a repo at another board by passing that input
-explicitly (section "Property names").
-
-That leaves one credential, and it goes on **each repo**, not the org:
+Both live on `operations_monorepo` only — that is the one repo the workflow runs in.
 
 ```bash
-read -rs NOTION_TOKEN && export NOTION_TOKEN   # silent prompt; paste, then Enter
-
-for r in car-data-server Penn-Electric-Racing PER-Data-Analyzer SuboptimumG; do
-  gh secret set NOTION_TOKEN --repo "Penn-Electric-Racing/$r" --body "$NOTION_TOKEN"
-done
+gh secret set NOTION_TOKEN   --repo Penn-Electric-Racing/operations_monorepo
+gh secret set GH_READ_TOKEN  --repo Penn-Electric-Racing/operations_monorepo
 ```
 
-`rollout.sh` does the same thing as part of onboarding — if `NOTION_TOKEN` is
-exported it seeds the secret on every repo in `$REPOS` before writing the
-workflow (section 3). Leave it unset and the script only writes workflows.
+Each prompts on stdin. Never pass a token as a literal `--body` value — that
+writes it to `~/.bash_history`.
 
-Needs **admin** on each repo. Never pass the token as a literal `--body` value:
-that writes it to `~/.bash_history`. The `read -rs` form above avoids it.
+| Secret | What it is |
+|---|---|
+| `NOTION_TOKEN` | The Notion integration secret from section 1. |
+| `GH_READ_TOKEN` | A **fine-grained** PAT granted access to every repo in `REPOS`. |
 
-### Why not an org secret
+`GH_READ_TOKEN` exists because the workflow's built-in `GITHUB_TOKEN` is scoped
+to `operations_monorepo` alone and cannot read issues in the other repos. Note
+its expiry date somewhere — when it lapses the poll fails, and nothing else
+tells you.
 
-`gh secret set --org ... --visibility all` looks like the obvious answer and
-does not work here: **org secrets do not reach private repos on the GitHub Free
-plan**, whatever visibility you set. A private repo just sees
-`secrets.NOTION_TOKEN` as an empty string and the run fails with
-`NOTION_TOKEN is not set`.
+Its permissions, all read-only:
 
-The REST API won't tell you — `.../actions/organization-secrets` still lists the
-secret, because it reports configured visibility, not the plan gate applied at
-run time. The reliable signal is the run log: GitHub omits inputs whose value is
-empty, so on a broken run `notion-token` is simply missing from the step's
-`with:` block while the defaults are all present.
-
-Repo-level secrets have no visibility setting and no plan gate, so they work
-everywhere. The cost is that each new repo needs the command re-run, and a token
-rotation has to touch every repo rather than one org setting.
-
----
-
-## 3. Install into each repository
-
-### In bulk
-
-```bash
-export ORG=Penn-Electric-Racing
-export REPOS="car-data-server Penn-Electric-Racing PER-Data-Analyzer SuboptimumG"
-export MODE=pr
-
-DRY_RUN=true ./scripts/rollout.sh   # preview
-./scripts/rollout.sh                # for real
-```
-
-`MODE=pr` writes to a `chore/notion-sync` branch and opens a PR. Use it by
-default: it is required on repos with branch protection and harmless on those
-without. Merge each PR — issue syncing does nothing until the workflow is on the
-default branch (section 6).
-
-Export `NOTION_TOKEN` too (section 2) and the same run also seeds the repo-level
-secret before writing the workflow, so onboarding is one command.
-
-Needs `gh` authenticated with `repo` and `workflow` scopes plus admin on each
-repo; the script checks the token scopes up front and refuses to start without
-them.
-
-| Variable | Default | Effect |
+| Scope | Permission | Used by the poller |
 |---|---|---|
-| `ORG` | *required* | Org that owns the target repos. |
-| `REPOS` | *required* | Space-separated repo **names**, not `owner/repo`. |
-| `MODE` | `direct` | `pr` opens a PR instead of writing to the default branch. |
-| `NOTION_TOKEN` | *unset* | If set, also seeds it as a repo-level Actions secret on each repo. |
-| `SYNC_REPO` | `$ORG/operations_monorepo` | Owner/name of the repo holding this action. |
-| `REF` | `main` | Tag or branch of the action to pin callers to, e.g. `REF=v1`. |
-| `DRY_RUN` | `false` | `true` prints what would happen and changes nothing. |
+| Repository | Metadata *(required)* | yes |
+| Repository | Issues | yes |
+| Repository | Pull requests | yes |
+| Organization | Projects | no — see Known limits |
+| Organization | Issue Fields | no |
+| Organization | Issue Types | no |
 
-How it behaves:
+Only the three repository permissions are load-bearing. The organization ones are
+granted deliberately but unused; `Projects` is the interesting one, since it is
+what reading the board's own Priority field would need.
 
-- A repo that already has the file is **updated**, not errored — the script
-  reuses the existing blob sha so the write is an update rather than a conflict.
-- A repo that fails (permissions, branch protection) prints the underlying
-  error and the script moves on to the next one. Every failure is repeated in a
-  `Failed: ...` line at the end, so one bad repo can't hide the rest.
-- Under `MODE=pr`, a `chore/notion-sync` branch that already exists is reused
-  and an already-open PR is left alone, so re-running is safe.
+**Repository access is per-repo, not org-wide.** Adding a repo to `REPOS`
+(section 3) without also granting the PAT access to it produces a `404` for that
+repo and silence for the rest.
 
-### By hand
-
-Copy `examples/caller-workflow.yml` into the target repo at
-`.github/workflows/notion-sync.yml` and commit it to the default branch. It
-already points at `Penn-Electric-Racing/operations_monorepo/notion-github-sync@main`; nothing else
-needs editing.
-
-### For new repos going forward
-
-Put the file in `workflow-templates/` of the org's `.github` repo with a small
-`.properties.json` beside it and it shows up as a suggested workflow in every new
-repo. Remember the repo-level secret still has to be set (section 2).
+`NOTION_TOKEN` is repo-level, not an org secret: org secrets don't reach private
+repos on the GitHub Free plan, and resolve to an empty string instead of erroring.
 
 ---
 
-## 4. Verify an install
+## 3. Map people to the Notion People columns
+
+`config/user-map.json` maps **GitHub login → Notion user ID**. Notion's People
+properties accept only user IDs, so an unmapped person leaves Owner and
+Contributors blank.
+
+List the IDs:
+
+```bash
+curl -s https://api.notion.com/v1/users \
+  -H "Authorization: Bearer $NOTION_TOKEN" \
+  -H "Notion-Version: 2022-06-28" | jq '.results[] | {name, id}'
+```
+
+Add one line per member. Dashes in the ID are optional.
+
+```json
+{
+  "alex-yang-upenn": "2b458698d1054366b74f598f6fd96357"
+}
+```
+
+The key must be the **exact GitHub login**, not a display name — the lookup is
+case-sensitive. Check one with `gh api users/<login> --jq .login`, or list who
+actually appears in a repo:
+
+```bash
+gh api repos/Penn-Electric-Racing/<repo>/contributors --jq '.[].login'
+```
+
+Unmapped logins are skipped silently, so a new contributor never breaks a sync.
+Malformed or all-zero IDs are dropped too — an ID that isn't a real workspace
+user would make Notion reject the whole page.
+
+---
+
+## 4. Add a repo to the sync
+
+Two steps, both one-liners:
+
+1. Add `Penn-Electric-Racing/<name>` to `DEFAULT_REPOS` at the top of
+   `scripts/backfill.mjs`.
+2. Grant `GH_READ_TOKEN` access to that repo, in the PAT's settings.
+
+Nothing is written to the target repo. `REPOS` overrides the list as a
+comma-separated `owner/repo` string for a one-off run against a subset.
+
+---
+
+## 5. Verify
 
 ```bash
 node scripts/test.mjs   # mapping self-check, no network, no credentials
-
-gh issue create --repo Penn-Electric-Racing/car-data-server \
-  --title "Notion sync smoke test" --label enhancement
-gh run list --repo Penn-Electric-Racing/car-data-server --workflow notion-sync.yml --limit 1
-gh run view --repo Penn-Electric-Racing/car-data-server --log
 ```
 
-The log prints `Created https://notion.so/...` plus a `Skipped properties:`
-line. Read that skip line on the first run — it names exactly which board
-columns didn't match.
+Then a dry run — reads only, writes nothing to Notion. With the two tokens in
+your environment it needs nothing else; the repo list and board ID are defaults
+in the scripts, so this runs exactly what the workflow runs:
+
+```bash
+export NOTION_TOKEN=ntn_...
+export GITHUB_TOKEN="$(gh auth token)"
+
+SINCE_MINUTES=60 DRY_RUN=true node scripts/backfill.mjs
+```
+
+It prints `N issues/PRs updated since <timestamp>` per repo and a `would create`
+/ `would update` line per item. Drop `SINCE_MINUTES` and the count should jump to
+the full history — that is the check that the window filter is doing its job.
+
+Narrow it to one repo with `REPOS=Penn-Electric-Racing/car-data-server`.
+
+Then the real thing:
+
+```bash
+gh workflow run notion-poll.yml --repo Penn-Electric-Racing/operations_monorepo
+gh run watch --repo Penn-Electric-Racing/operations_monorepo
+```
+
+Read the `Skipped properties:` lines on the first run — they name exactly which
+board columns didn't match.
 
 ---
 
-## 5. Backfill existing issues and PRs
+## 6. Backfill existing issues and PRs
 
-Run once, from this repo, to import everything that predates the workflow:
+**This is required once, and the poll cannot do it for you.** The poll only looks
+at items updated in the last `SINCE_MINUTES`, so an issue nobody has touched
+recently never enters its window — not on the first run, not ever. Everything
+that predates the sync has to be imported by one full pass.
+
+Same script as the poll, with no window, so it walks the full history:
 
 ```bash
-export NOTION_TOKEN=ntn_... NOTION_SOFTWARE_PROJECT_BOARD_DATABASE_ID=...
+unset REPOS SINCE_MINUTES   # in case either is left over in your shell
+export NOTION_TOKEN=ntn_...
 export GITHUB_TOKEN="$(gh auth token)"
-export REPOS="Penn-Electric-Racing/operations_monorepo,Penn-Electric-Racing/car-data-server,Penn-Electric-Racing/SuboptimumG"
 
 DRY_RUN=true node scripts/backfill.mjs   # preview
 node scripts/backfill.mjs                # for real
 ```
 
-Note the fully-qualified `owner/repo` here, unlike `rollout.sh`.
-
 | Variable | Default | Effect |
 |---|---|---|
-| `REPOS` | *required* | Comma-separated `owner/repo`. |
+| `NOTION_TOKEN` | *required* | Notion integration secret. |
 | `GITHUB_TOKEN` | *required* | Reads issues and PRs. `$(gh auth token)` is fine. |
+| `REPOS` | `DEFAULT_REPOS` in the script | Comma-separated `owner/repo`, to run against a subset. |
+| `SINCE_MINUTES` | *unset* | Unset walks everything; set, only items updated in that window. |
 | `BACKFILL_STATE` | `all` | `all`, `open` or `closed`. |
 | `DRY_RUN` | `false` | `true` prints every create/update without writing to Notion. |
+| `NOTION_SOFTWARE_PROJECT_BOARD_DATABASE_ID` | the board ID in `mapping.mjs` | Target a different database. |
 
 The script paces itself at ~3 requests/second to stay inside Notion's rate
 limit, so a few thousand items takes a while. It is safe to re-run and safe to
 interrupt — the GitHub URL is the dedupe key, so a second pass updates in place
-rather than duplicating. After it finishes, the webhooks take over.
+rather than duplicating. The poll picks up from there.
 
 ---
 
-## 6. What triggers from where
+## 7. How the poll works
 
-This asymmetry only matters while you're installing:
+`.github/workflows/notion-poll.yml` runs `scripts/backfill.mjs` every 15
+minutes. `workflow_dispatch` runs it on demand.
 
-| Event | Workflow file is read from | Consequence |
-|---|---|---|
-| `pull_request` | the **PR's head branch** | The PR that adds this workflow will run it, and create a card for itself. |
-| `issues` | the **default branch** | Issue syncing does nothing until the workflow is merged to main. |
+`SINCE_MINUTES: 60` makes it fetch only items whose `updated_at` falls in the
+last hour, instead of every issue ever. The window is deliberately much wider
+than the 15-minute interval: GitHub delays scheduled runs under load and **may drop
+them entirely**, so a tight window would lose items silently, while re-syncing
+an unchanged item is a harmless in-place update.
 
-Once installed, normal usage is unaffected. PRs sync the moment they open — an
-unmerged PR sitting in review appears on the board as `Active Unclaimed`, which
-is the point. Only `merged` moves it to `Done`.
+Expect up to 15 minutes of latency, plus whatever GitHub adds.
+
+A `concurrency` group prevents a slow run from overlapping the next one.
 
 ---
 
@@ -245,13 +260,9 @@ Status transitions:
 | PR closed unmerged | `Abandoned` (override with `STATUS_PR_CLOSED_UNMERGED`) |
 | Open item someone claimed in Notion | *untouched* — see below |
 
-These names must match the board's status **options**, not its status **groups**.
-Notion's API cannot create status options, so a name the database doesn't know
-would otherwise fail the whole run with `400 validation_error`. The mapper
-resolves the configured name against the live schema first: exact match, then
-case-insensitive, then a **group** name — `In progress` resolves to
-`Active Unclaimed`, that group's first option. Only if none of those hit is
-Status left unwritten, with a warning.
+Names are resolved against the live schema — exact, then case-insensitive, then
+as a status **group** (`In progress` → that group's first option). If none match,
+Status is left unwritten with a warning rather than failing the run.
 
 ### Claiming
 
@@ -259,10 +270,9 @@ The sync never writes `Active Claimed`. Claiming is a human move in Notion: drag
 card from `Active Unclaimed` to `Active Claimed` and it stays there through every
 later GitHub event on that item.
 
-The rule is that the sync only overwrites an open item's status when the status
-currently on the page is one it could have written itself — `Not started`,
-`Active Unclaimed`, or (on a PR) `Hold`. Anything else was put there by a person, so
-it is left alone. Two consequences worth knowing:
+The sync only overwrites an open item's status when the current value is one it
+could have written itself — `Not started`, `Active Unclaimed`, or (on a PR)
+`Hold`. Anything else was set by a person and is left alone. Two consequences:
 
 - **`Hold` sticks on an issue, not on a PR.** On a PR, `Hold` means "draft", which
   GitHub tells us, so a PR marked ready for review moves back to `Active Unclaimed`.
@@ -270,9 +280,6 @@ it is left alone. Two consequences worth knowing:
   park and survives.
 - **Closing always wins.** Merging, closing or abandoning are facts from GitHub and
   overwrite a claim — otherwise claimed cards would never leave the board.
-
-Cards still sitting in `Not started` from an earlier version of this sync are
-migrated forward to `Active Unclaimed` on their next event.
 
 Set `respect-manual-status: "false"` if you'd rather GitHub always win, including
 over claims.
@@ -285,19 +292,7 @@ A deleted or transferred issue (`action: deleted`) **archives** its Notion page
 rather than editing it. Archived pages leave the board but stay recoverable from
 Notion's trash; nothing is destroyed.
 
-### Mapping GitHub people to the People columns
-
-`config/user-map.json` maps GitHub login → Notion user UUID. List the UUIDs:
-
-```bash
-curl -s https://api.notion.com/v1/users \
-  -H "Authorization: Bearer $NOTION_TOKEN" \
-  -H "Notion-Version: 2022-06-28" | jq '.results[] | {name, id}'
-```
-
-Add a line per member and commit it here — every mirrored repo picks it up on
-the next event. Unmapped logins are dropped silently, so a new contributor
-never breaks a sync; they just don't appear in Owner or Contributors.
+### Mapping labels to Tags
 
 `config/label-map.json` works the same way for GitHub label → Notion tag. A
 value may be a string or an array, so one label can fan out to several tags. With
@@ -305,12 +300,9 @@ value may be a string or an array, so one label can fan out to several tags. Wit
 creating a new option on the Tags property. The `Issue`/`PR` tag does not come
 from here — it's derived from the item kind and is added regardless.
 
-**There is no heuristic for rookie issues.** An issue gets the `Rookie Project` tag
-only if someone applied one of the mapped labels on GitHub — by default
-`rookie-project`, `rookie`, `good first issue` or `onboarding`. `good first issue`
-is GitHub's built-in label and is the one to standardize on. Nothing about the
-issue's title, body, author or size is inspected, so an unlabeled rookie issue
-syncs with just the `Issue` tag.
+**`Rookie Project` is label-driven only** — `rookie-project`, `rookie`,
+`good first issue` or `onboarding`. Nothing about the issue itself is inspected.
+Standardize on `good first issue`, GitHub's built-in.
 
 ### Property names
 
@@ -330,9 +322,8 @@ Recognized keys: `PROP_URL`, `PROP_NUMBER`, `PROP_STATUS`,
 `STATUS_DONE`, `STATUS_PR_CLOSED_UNMERGED`; and `TAG_ISSUE`, `TAG_PR`. Other keys
 are rejected.
 
-Anything that doesn't exist on the database, or whose type the mapper can't
-write, is skipped with a warning rather than failing the run. That tolerance is
-what keeps the sync alive as the board schema drifts.
+Anything missing from the database, or of a type the mapper can't write, is
+skipped with a warning rather than failing the run.
 
 ---
 
@@ -342,12 +333,11 @@ what keeps the sync alive as the board schema drifts.
 |---|---|
 | `404 object_not_found` from Notion | Integration isn't connected to the database (section 1). |
 | `Could not find database with ID` | You used a page ID, not the database ID. |
-| `Changes must be made through a pull request` (409) from `rollout.sh` | Branch protection on that repo. Re-run as `MODE=pr ./scripts/rollout.sh`. |
-| `gh: Not Found (HTTP 404)` from `rollout.sh` | Token lacks the `workflow` scope — writes under `.github/workflows/` 404 rather than 403. `gh auth refresh -h github.com -s workflow`. |
-| `NOTION_SOFTWARE_PROJECT_BOARD_DATABASE_ID is not set` | The caller workflow passes that input as an empty value. Drop the line and let the action's default apply. |
-| `NOTION_TOKEN is not set` | No repo-level secret on this repo. Org secrets don't reach private repos on the Free plan (section 2). |
-| Workflow never runs on new issues | The file isn't on the default branch yet (section 6). |
-| Nothing runs on a fork's PR | By design — fork PRs get no secrets. |
+| `NOTION_SOFTWARE_PROJECT_BOARD_DATABASE_ID is not set` | Missing from the workflow's `env:` block (section 6). |
+| `NOTION_TOKEN is not set` | No repo-level secret on `operations_monorepo`. Org secrets don't reach private repos on the Free plan (section 2). |
+| `404` or `403` listing issues for one repo | `GH_READ_TOKEN` has expired, or was never granted access to that repo (section 3). |
+| A repo silently stops syncing | It's missing from `REPOS`, or the PAT lost access to it. |
+| Nothing has synced for days | The scheduled workflow was auto-disabled, or runs are being dropped. `gh run list --workflow notion-poll.yml`. |
 | Status never changes | The configured option doesn't exist on the board and didn't resolve to a group either; the API can't create status options, only `select` ones. Look for `Status (option "X" not on database)` in the log. |
 | Owner/Contributors stay empty | GitHub logins missing from `config/user-map.json`. |
 | Duplicate cards appear | The `GitHub URL` property was renamed or removed, so dedupe can't find matches. |
@@ -357,24 +347,40 @@ what keeps the sync alive as the board schema drifts.
 
 ## Known limits
 
-- **Fork PRs.** Runs from a fork have no access to secrets. The caller workflow
-  skips them by design. `pull_request_target` would fix it but exposes the
-  Notion token to untrusted code — don't.
+- **Latency.** Up to an hour, plus whatever GitHub adds. Scheduled workflows are
+  delayed under load and queued jobs may be dropped outright, so treat the board
+  as eventually consistent. This is the price of not installing a workflow in
+  every repo.
+- **Deletions are invisible.** A deleted or transferred issue used to archive its
+  Notion page, which came from the `deleted` webhook event. A poller cannot see
+  something that stopped existing, so the card is left behind — remove it by hand.
+- **Requested reviewers are missing.** The `/issues` endpoint omits
+  `requested_reviewers`, so Contributors is author + assignees only. `draft` and
+  `merged_at` are present, so Status is unaffected.
+- **Inactivity disables the schedule.** GitHub disables scheduled workflows in a
+  *public* repo after 60 days with no repository activity, and `operations_monorepo`
+  is public on purpose: public repos get unlimited free Actions minutes, while
+  private ones draw on the org's 2,000/month pool shared with all other CI. An
+  15-minute poll would take ~2,880 of those, since each run bills as a full
+  minute however little it does. Any commit resets the 60-day clock; a re-enable is
+  manual, and it fails quietly.
+- **PAT expiry.** `GH_READ_TOKEN` is the single point of failure for every repo
+  at once, and it fails silently on expiry.
 - **Direction.** One-way, GitHub → Notion. Closing a card in Notion does not
   close the issue; that would need Notion webhooks.
-- **Races.** Two events landing within a second on the same item could both see
-  "no existing page" and create duplicates. The `concurrency` group in the
-  caller workflow serializes per issue/PR number to prevent this.
 - **API version.** Pinned to `2022-06-28`, where pages parent directly to a
   `database_id`. On `2025-09-03` and later, databases gain data sources:
   `parent` becomes `{data_source_id}` and queries hit
   `/data_sources/{id}/query`. Those three call sites are isolated in
   `scripts/lib/notion.mjs`.
-- **Priority is not synced.** The board's Priority lives in GitHub Projects v2,
-  which this action cannot read: `projects_v2_item` is not a supported Actions
-  trigger, and `GITHUB_TOKEN` cannot hold the `read:project` scope. Mirroring it
-  would need a scheduled reconciler plus a PAT. Notion's Priority column is
-  manual and the sync never touches it.
+- **Priority is not synced — by choice, not by obstacle.** Notion's Priority
+  column is manual and the sync never writes it. This was originally blocked
+  twice over: `projects_v2_item` is not a supported Actions trigger, and
+  `GITHUB_TOKEN` cannot read Projects v2. Both blockers are gone — the scheduled
+  poller replaced the trigger, and `GH_READ_TOKEN` already holds organization
+  `Projects: read-only`. What remains is the work: a GraphQL query per poll for
+  the project's items and their Priority value, joined to the Notion rows on
+  issue/PR URL. Don't re-derive the old "impossible" conclusion.
 - **Rate limit.** Notion allows roughly 3 requests/second. Each webhook uses 3
   calls, fine for normal traffic; a mass label edit across a big repo can trip
   it.
